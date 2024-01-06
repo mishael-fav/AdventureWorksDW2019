@@ -1,0 +1,206 @@
+use AdventureWorksDW2019;
+
+select * from [dbo].[DimCustomer];
+
+DROP TABLE IF EXISTS Project..[Customers];
+--Customers
+select C.[CustomerKey]
+		,[FirstName]
+      ,[LastName]
+	  ,FirstName + ' ' + LastName as CustomerName
+      ,[BirthDate]
+      ,CASE [MaritalStatus] WHEN 'M' THEN 'Married' WHEN 'S' THEN 'Single' END AS MaritalStatus
+	  ,CASE [Gender] WHEN 'M' THEN 'Male' WHEN 'F' THEN 'Female' END AS Gender
+      ,[YearlyIncome]    
+      ,[NumberChildrenAtHome] as Children
+      ,[EnglishOccupation] as Occupation
+      ,[DateFirstPurchase] as FirstPurchase
+	  ,[CommuteDistance] as Distance
+	  ,G.[City] as City
+	  ,cast(FI.[OrderDate] as date) OrderDate
+      ,cast(FI.[DueDate] as date) DueDate
+      ,cast(FI.[ShipDate] as date) ShipDate
+into Project..[Customers]
+
+from dbo.DimCustomer C
+Left Join dbo.DimGeography G on C.[GeographyKey] = G.[GeographyKey]
+left join dbo.FactInternetSales FI on C.[CustomerKey] = FI.[CustomerKey]
+order by CustomerKey asc
+;
+
+select * from Project..[Customers];
+--select * from AdventureWorksDW2019..DimCustomer
+
+--Date
+DROP TABLE IF EXISTS Project..[Date];
+
+select [DateKey]
+      ,[FullDateAlternateKey] as Date
+      ,[EnglishDayNameOfWeek] as Day
+	   ,[WeekNumberOfYear] as WeekNo
+      ,[EnglishMonthName] as Month
+	  ,LEFT([EnglishMonthName],3) as MonthShrt
+      ,[MonthNumberOfYear] as MonthNo
+      ,[CalendarQuarter] as Quater
+      ,[CalendarYear] as Year
+into Project..[Date]
+from dbo.DimDate 
+where [CalendarYear] >= 2020
+;
+
+
+select * from [dbo].[DimDate];
+select * from Project..[Date];
+
+-- From the Business Request (The budget is for 2022 and we usually look 2 years back in time when we do analysis of sales.)
+select distinct year from Date 
+order by year desc;
+
+--PRODUCT
+DROP TABLE IF EXISTS Project..[Product];
+
+SELECT P.[ProductKey]
+      ,[ProductAlternateKey]
+      ,PC.[EnglishProductCategoryName] as ProductCategory
+	  ,PS.[EnglishProductSubcategoryName] as ProductSubcategory
+      ,[EnglishProductName] as ProductName
+	  ,cast(FI.[OrderDate] as date) OrderDate
+	  ,FI.[OrderQuantity]
+      ,Round (FI.[UnitPrice], 1) as UnitPrice
+      ,FI.[TotalProductCost] as TotalCost
+      ,FI.[SalesAmount]
+      ,[Color]
+      ,[StandardCost]
+      ,[ProductLine]
+      ,[ModelName] 
+      ,[EnglishDescription] as Description
+	  ,ISNULL(Status, 'Outdated') as Status
+into Project..[Product]
+
+FROM dbo.DimProduct P
+  LEFT JOIN dbo.DimProductSubcategory PS on P.[ProductSubcategoryKey] = PS.[ProductSubcategoryKey]
+  LEFT JOIN dbo.DimProductCategory PC on PS.[ProductCategoryKey] = PC.[ProductCategoryKey]
+  LEFT JOIN [dbo].[FactInternetSales] FI on P.[ProductKey] = FI.[ProductKey]
+;
+
+select * from Project..[Product];
+
+--Checking and Deleting NULL VALUES
+select count(ProductKey) from Project..Product where UnitPrice is null; --Number of rows with null value at Unit Price
+
+Delete from Project..Product
+where UnitPrice is null;
+
+
+--Data Exploration 
+
+--Which Category of Products sells the most
+select ProductCategory,sum(orderQuantity) Quantity_ordered, round(sum(TotalCost),0) Total_cost
+from Project..[Product]
+group by ProductCategory; --Accessories sells the most, but Bikes return the highest amount
+
+
+--what factors influence the customer purchase
+select CustomerName, ProductCategory, sum(orderQuantity) Quantity_ordered, round(sum(TotalCost),0) Total_cost,
+	  MaritalStatus,
+	  Gender,
+      YearlyIncome,
+	  Children,
+      Occupation,
+	  Distance,
+	  City
+from project..Customers C join Project..Product P on C.OrderDate = P.OrderDate
+group by ProductCategory, CustomerName, MaritalStatus, Gender, YearlyIncome, Children, Occupation, Distance, City;
+
+--How much does the marriage status affect Purchase
+select MaritalStatus, count(MaritalStatus) Number, round(sum(TotalCost),0) Total_cost 
+from project..Customers C join Project..Product P on C.OrderDate = P.OrderDate
+group by MaritalStatus
+
+--How much does gender affect purchase
+select Gender, sum(orderQuantity) Quantity_ordered, round(sum(TotalCost),0) Total_cost 
+from project..Customers C join Project..Product P on C.OrderDate = P.OrderDate
+group by Gender
+
+--The Yearly Income contributes reasonably to the quantity ordered
+select YearlyIncome,
+		sum(orderQuantity) Quantity_ordered, round(sum(TotalCost),0) Total_cost,
+		NTILE(4) OVER (ORDER BY YearlyIncome) Yearly_income,
+		NTILE(4) OVER (ORDER BY orderQuantity) Quantity_ordered,
+		NTILE(4) OVER (ORDER BY TotalCost) Total_cost
+from project..Customers C join Project..Product P on C.OrderDate = P.OrderDate
+group by YearlyIncome, orderQuantity, TotalCost, ProductSubcategory
+
+
+--FILTERING FOR RFM ANALYSIS
+
+use Project;
+
+DROP TABLE IF EXISTS Project..[RFM_analysis];
+
+Select CustomerKey, CustomerName, ProductKey, totalcost, P.ProductCategory, P.OrderQuantity, FirstPurchase, C.OrderDate
+into project..RFM_analysis
+from Customers C
+inner join Product P on C.OrderDate = P.OrderDate
+order by CustomerName
+;
+
+--Select customerKey, totalcost from project..RFM_analysis group by CustomerKey, TotalCost order by CustomerKey asc;
+
+DROP TABLE IF EXISTS Project..[rfm_data];
+
+with rfm as (
+		select CustomerName, count(OrderQuantity) Frequency, round(sum(totalcost),0) MonetaryValue, max(OrderDate) Last_Order_Date,
+			(select max(OrderDate) from RFM_analysis) Max_Order_Date,
+			DATEDIFF(DAY, max(OrderDate), (select max(OrderDate) from RFM_analysis)) Recency
+		from RFM_analysis 
+		Group by CustomerName
+),
+
+rfm_bin as (
+		Select r.*,
+				NTILE(4) OVER (ORDER BY Recency desc) rfm_Recency, --customers categorized with higher number made most recent purchase
+				NTILE(4) OVER (ORDER BY Frequency) rfm_Frequency,
+				NTILE(4) OVER (ORDER BY MonetaryValue) rfm_MonetaryValue
+		from rfm r
+),
+
+rfm_categorize as(
+	select b.*, CAST(rfm_Recency as varchar) + CAST(rfm_Frequency as varchar) + CAST(rfm_MonetaryValue as varchar) rfm_concat
+	from rfm_bin b
+)
+
+select CustomerName, rfm_Recency, rfm_Frequency, rfm_MonetaryValue,
+	case 
+		when rfm_concat in (111, 112, 113, 114, 121, 122, 123, 124) then 'Churners'
+		when rfm_concat in (131, 132, 141, 142, 133, 134, 143, 144, 211, 212, 213, 214, 221, 222, 223, 224, 231, 232, 233, 234, 241, 242, 243, 244) then 'Potential Churners'
+		when rfm_concat in (311, 312, 313, 314, 321, 322, 323, 324, 411, 412, 413, 414, 421, 422, 423, 424) then 'New Customers'
+		when rfm_concat in (331, 332, 333, 334, 341, 342, 343, 344, 431, 432) then 'Active'
+		when rfm_concat in (433, 434, 441, 442, 443, 444) then 'Loyal Customers'
+	end rfm_segment
+into rfm_data
+from rfm_categorize
+order by rfm_segment;
+
+select rfm_segment,
+	count(CustomerName) No_of_customers, 
+	round ((count(*) * 100.0 / (select count(CustomerName)from rfm_data)), 2) percentage
+	--round( count(d.CustomerName) from rfm_data / count(CustomerName)  , 4) * 100
+from rfm_data 
+group by rfm_segment
+;
+
+
+select * from RFM_analysis;
+
+SELECT customerkey, SUM(orderQuantity) as total_purchase FROM RFM_analysis GROUP BY CustomerKey;
+
+SELECT customerkey, SUM(orderQuantity) as total_purchase FROM (
+SELECT customerkey, orderQuantity, ROW_NUMBER() OVER (PARTITION BY customerkey ORDER BY orderQuantity) as row_num
+FROM RFM_analysis
+) t
+GROUP BY CustomerKey
+
+SELECT customerkey, sum(orderQuantity) OVER (PARTITION BY customerkey ORDER BY orderQuantity)
+FROM RFM_analysis
+GROUP BY CustomerKey, orderQuantity;
